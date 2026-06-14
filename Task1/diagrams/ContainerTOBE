@@ -1,0 +1,311 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LEFT_RIGHT()
+
+title C4 Container Diagram — AdScale Target Architecture (TO-BE, 1 year)
+
+' ====================== Акторы и внешние системы ======================
+Person(advertiser, "Рекламодатель", "Создаёт кампании, управляет ставками, бюджетами и смотрит отчётность")
+Person_Ext(endUser, "Пользователь сайта/приложения", "Просматривает рекламу и кликает по баннерам")
+
+System_Ext(dspPartner, "DSP-партнёры", "Отправляют bid requests и получают bid responses по OpenRTB")
+System_Ext(paymentGateway, "Платёжный шлюз", "Обработка пополнения рекламных бюджетов")
+System_Ext(notificationProvider, "Email/SMS/Push Provider", "Уведомления рекламодателей о платежах, лимитах и статусах кампаний")
+
+' ====================== Edge / API слой ======================
+System_Boundary(edge, "Edge / API Layer") {
+
+    Container(apiGateway, "API Gateway", "Kong / NGINX / Envoy", "Единая точка входа для Dashboard API: TLS termination, auth, rate limiting, routing")
+
+    Container(bidGateway, "DSP Bid Gateway", "Go / C++", "Высокопроизводительный входной шлюз для bid requests: OpenRTB validation, partner routing, timeout budget, rate limiting") <<Critical Path>>
+
+    Container(cdn, "CDN / Static Assets", "CDN", "Раздача статических ресурсов рекламного кабинета и JS/assets")
+}
+
+' ====================== RTB Runtime ======================
+System_Boundary(rtb, "RTB Runtime Services") {
+
+    Container(adServerSvc, "Ad Serving Service", "Go / C++", "Определение пользователя, таргетинг, подбор кандидатов, подготовка запроса на аукцион") <<Critical Path>>
+
+    Container(auctionSvc, "Auction Service", "C++ / Go", "Расчёт победителя RTB-аукциона: ставки, правила, pacing, budget checks, bid response decision") <<Critical Path>>
+
+    Container(deliverySvc, "Delivery Service", "Node.js / Go", "Формирование креатива, HTML/JS/VAST/native response, трекинговых ссылок")
+
+    Container(userProfileSvc, "User Profile Service", "Go", "Сегменты, признаки пользователя, frequency capping, user matching")
+
+    Container(budgetGuardSvc, "Budget Guard Service", "Go", "Быстрая проверка доступности бюджета и лимитов для hot path без финансовых транзакций")
+}
+
+' ====================== Campaign / Advertiser domain ======================
+System_Boundary(campaign, "Campaign Management Domain") {
+
+    Container(campaignSvc, "Campaign Service", "Go / Node.js", "CRUD кампаний, таргетинг, статусы, расписания, правила показа")
+
+    Container(bidStrategySvc, "Bid Strategy Service", "Go / Python", "Управление ставками, стратегиями оптимизации, bid modifiers")
+
+    Container(creativesSvc, "Creative Service", "Node.js / Go", "Управление креативами, модерация, версии, asset metadata")
+
+    Container(dashboardBff, "Advertiser Dashboard BFF", "Node.js", "Backend-for-Frontend для рекламного кабинета: агрегация API, auth context, UI-specific endpoints")
+
+    Container(spa, "Advertiser Dashboard SPA", "JavaScript / React", "Web UI рекламодателя")
+}
+
+' ====================== Event / Statistics domain ======================
+System_Boundary(events, "Event & Statistics Domain") {
+
+    Container(eventCollector, "Event Collector Service", "Go", "Приём событий показов, кликов, win/loss, auction result; быстрый ack и запись в Kafka") <<High Throughput>>
+
+    Container(statsProcessor, "Statistics Processor", "Go / Flink / Kafka Streams", "Агрегация событий по кампаниям, креативам, DSP, времени")
+
+    Container(billingEventsConsumer, "Billing Events Consumer", "Go", "Потребляет billable events и передаёт их в финансовый домен для списаний")
+
+    Container(fraudDetectionSvc, "Fraud Detection Service", "Python / Go", "Асинхронная проверка подозрительных кликов/показов, скоринг fraud-событий")
+}
+
+' ====================== Finance / Billing domain ======================
+System_Boundary(finance, "Finance & Billing Domain") {
+
+    Container(financeSvc, "Finance Service", "Go", "Пополнения, балансы, ledger, invoices, корректные финансовые транзакции") <<Strong Consistency>>
+
+    Container(billingSvc, "Billing Service", "Go", "Расчёт стоимости событий, списания по billable events, сверка расходов")
+
+    Container(paymentSvc, "Payment Integration Service", "Go", "Интеграция с внешним payment gateway, webhooks, idempotency")
+}
+
+' ====================== Analytics / Reporting domain ======================
+System_Boundary(analytics, "Analytics & Reporting Domain") {
+
+    Container(reportingSvc, "Reporting Service", "Python / Go", "API отчётов для рекламодателей: кампании, показы, клики, CTR, spend, ROI")
+
+    Container(analyticsProcessor, "Analytics Processor", "Flink / Spark / Python", "ETL/ELT обработка событий, построение витрин и долгосрочной аналитики")
+
+    Container(realtimeMetricsSvc, "Realtime Metrics Service", "Go / Kafka Streams", "Near-real-time метрики для dashboard и operational monitoring")
+}
+
+' ====================== Platform / Infrastructure ======================
+System_Boundary(platform, "Platform & Infrastructure") {
+
+    Container(messageBroker, "Kafka Cluster", "Apache Kafka", "Event streaming: impressions, clicks, auction-results, billing-events, campaign-change-events") <<Event Backbone>>
+
+    Container(redisCluster, "Redis Cluster", "Redis", "Low-latency cache для hot data: кампании, ставки, таргетинг, budget snapshots, user caps") <<Low Latency>>
+
+    Container(configSvc, "Config / Feature Flag Service", "Unleash / LaunchDarkly / Custom", "Feature flags, canary, DSP traffic routing, kill switches")
+
+    Container(serviceMesh, "Service Mesh", "Istio / Linkerd / Envoy", "mTLS, retries, circuit breakers, traffic splitting, observability")
+
+    Container(observability, "Observability Stack", "Prometheus / Grafana / Loki / Tempo / Jaeger", "Метрики, логи, трассировка, SLA/SLO мониторинг")
+
+    Container(schemaRegistry, "Schema Registry", "Confluent / Apicurio", "Контракты событий Kafka и совместимость схем")
+}
+
+' ====================== Databases / Storage ======================
+System_Boundary(data, "Data Stores") {
+
+    ContainerDb(campaignDb, "Campaign DB", "PostgreSQL HA", "Кампании, таргетинг, статусы, настройки показов")
+
+    ContainerDb(strategyDb, "Bid Strategy DB", "PostgreSQL HA", "Ставки, стратегии, bid modifiers, правила оптимизации")
+
+    ContainerDb(creativeDb, "Creative DB", "PostgreSQL HA", "Метаданные креативов, статусы модерации, версии")
+    ContainerDb(objectStorage, "Creative Object Storage", "S3-compatible", "Изображения, видео, HTML/JS assets")
+
+    ContainerDb(userProfileDb, "User Profile Store", "Cassandra / ScyllaDB / Redis", "Профили пользователей, сегменты, frequency capping")
+
+    ContainerDb(financeDb, "Finance DB", "PostgreSQL HA", "Ledger, балансы, invoices, платежи, транзакции") <<Strong Consistency>>
+
+    ContainerDb(statsDb, "Statistics Store", "ClickHouse", "Агрегированная статистика показов, кликов, win/loss, cost metrics")
+
+    ContainerDb(analyticsDwh, "Analytics DWH", "ClickHouse / BigQuery / Snowflake", "Историческая аналитика, витрины данных, тяжёлые отчёты")
+
+    ContainerDb(idempotencyDb, "Payment Idempotency Store", "PostgreSQL / Redis", "Idempotency keys, payment webhook state")
+}
+
+' ====================== Внешние связи ======================
+Rel(advertiser, spa, "Работает с кабинетом", "HTTPS")
+Rel(spa, cdn, "Загружает static assets", "HTTPS")
+Rel(spa, apiGateway, "Dashboard API calls", "HTTPS / REST")
+Rel(dspPartner, bidGateway, "Bid requests / bid responses", "HTTPS / OpenRTB")
+Rel(endUser, deliverySvc, "Получает рекламу / кликает", "HTTPS")
+Rel(paymentGateway, paymentSvc, "Payment webhooks / payment status", "HTTPS / REST")
+Rel(paymentSvc, paymentGateway, "Create payment / refund / status check", "HTTPS / REST")
+Rel(financeSvc, notificationProvider, "Уведомления о платежах, лимитах, счетах", "HTTPS / REST")
+
+' ====================== Dashboard / API связи ======================
+Rel(apiGateway, dashboardBff, "Routes advertiser API requests", "HTTPS / REST")
+Rel(dashboardBff, campaignSvc, "Управление кампаниями", "gRPC / REST")
+Rel(dashboardBff, bidStrategySvc, "Управление ставками и стратегиями", "gRPC / REST")
+Rel(dashboardBff, creativesSvc, "Управление креативами", "gRPC / REST")
+Rel(dashboardBff, financeSvc, "Балансы, счета, платежи", "gRPC / REST")
+Rel(dashboardBff, reportingSvc, "Отчёты и аналитика", "gRPC / REST")
+
+' ====================== RTB hot path ======================
+Rel(bidGateway, adServerSvc, "Validated bid request", "gRPC / low-latency")
+Rel(adServerSvc, userProfileSvc, "Получение сегментов и caps", "gRPC")
+Rel(adServerSvc, auctionSvc, "Кандидаты и контекст аукциона", "gRPC / low-latency")
+Rel(auctionSvc, budgetGuardSvc, "Fast budget / pacing check", "gRPC / cache-backed")
+Rel(auctionSvc, deliverySvc, "Winner and creative context", "gRPC")
+Rel(deliverySvc, bidGateway, "Bid response payload", "gRPC")
+Rel(bidGateway, dspPartner, "Bid response", "HTTPS / OpenRTB")
+
+' ====================== Cache usage ======================
+Rel(adServerSvc, redisCluster, "Читает hot campaigns, targeting cache", "Redis")
+Rel(auctionSvc, redisCluster, "Читает ставки, pacing, budget snapshots", "Redis")
+Rel(budgetGuardSvc, redisCluster, "Budget snapshots / atomic counters", "Redis")
+Rel(userProfileSvc, redisCluster, "Frequency caps / user cache", "Redis")
+Rel(deliverySvc, redisCluster, "Creative metadata cache", "Redis")
+
+' ====================== Events ======================
+Rel(deliverySvc, eventCollector, "Impression / click tracking events", "HTTPS / async")
+Rel(bidGateway, eventCollector, "Bid request / timeout / error events", "Async HTTP / UDP / gRPC")
+Rel(auctionSvc, eventCollector, "Auction result events", "Async gRPC")
+Rel(eventCollector, messageBroker, "Publishes raw events", "Kafka")
+
+Rel(messageBroker, statsProcessor, "Consumes impressions/clicks/auction-results", "Kafka")
+Rel(messageBroker, billingEventsConsumer, "Consumes billable events", "Kafka")
+Rel(messageBroker, fraudDetectionSvc, "Consumes click/impression events", "Kafka")
+Rel(messageBroker, analyticsProcessor, "Consumes event stream", "Kafka")
+Rel(messageBroker, realtimeMetricsSvc, "Consumes operational and business events", "Kafka")
+
+Rel(campaignSvc, messageBroker, "Publishes campaign-change-events", "Kafka")
+Rel(bidStrategySvc, messageBroker, "Publishes bid-strategy-change-events", "Kafka")
+Rel(creativesSvc, messageBroker, "Publishes creative-change-events", "Kafka")
+Rel(financeSvc, messageBroker, "Publishes balance-change-events", "Kafka")
+Rel(billingSvc, messageBroker, "Publishes billing-events", "Kafka")
+
+' ====================== Event-driven cache refresh ======================
+Rel(messageBroker, adServerSvc, "Consumes campaign/targeting changes for cache warmup", "Kafka")
+Rel(messageBroker, auctionSvc, "Consumes bid strategy and budget updates", "Kafka")
+Rel(messageBroker, budgetGuardSvc, "Consumes balance/budget updates", "Kafka")
+Rel(messageBroker, deliverySvc, "Consumes creative updates", "Kafka")
+
+' ====================== Финансы и биллинг ======================
+Rel(billingEventsConsumer, billingSvc, "Billable event commands", "gRPC / async command")
+Rel(billingSvc, financeSvc, "Списание средств / ledger entries", "gRPC / transactional boundary")
+Rel(financeSvc, paymentSvc, "Payment operations", "gRPC / REST")
+
+' ====================== Databases per service ======================
+Rel(campaignSvc, campaignDb, "Owns campaign data", "SQL")
+Rel(bidStrategySvc, strategyDb, "Owns bid strategy data", "SQL")
+Rel(creativesSvc, creativeDb, "Owns creative metadata", "SQL")
+Rel(creativesSvc, objectStorage, "Stores creative assets", "S3 API")
+Rel(userProfileSvc, userProfileDb, "Owns user profile / caps data", "NoSQL / Redis")
+Rel(financeSvc, financeDb, "Owns financial ledger and balances", "SQL / ACID")
+Rel(paymentSvc, idempotencyDb, "Payment idempotency and webhook state", "SQL / Redis")
+Rel(statsProcessor, statsDb, "Writes aggregated statistics", "Batch / Stream write")
+Rel(reportingSvc, statsDb, "Reads aggregated statistics", "SQL")
+Rel(analyticsProcessor, analyticsDwh, "Writes analytical datasets", "Batch / Stream")
+Rel(reportingSvc, analyticsDwh, "Reads historical reports", "SQL")
+Rel(realtimeMetricsSvc, statsDb, "Writes near-real-time aggregates", "SQL / batch insert")
+
+' ====================== Platform interactions ======================
+Rel(apiGateway, configSvc, "Feature flags / routing config", "HTTP")
+Rel(bidGateway, configSvc, "DSP routing, canary, kill switch", "HTTP / local cache")
+Rel(adServerSvc, configSvc, "Runtime flags", "HTTP / local cache")
+Rel(auctionSvc, configSvc, "Auction flags, kill switches", "HTTP / local cache")
+
+Rel(apiGateway, serviceMesh, "Managed traffic policies", "Envoy sidecar")
+Rel(bidGateway, serviceMesh, "mTLS, circuit breakers, traffic splitting", "Envoy sidecar")
+Rel(adServerSvc, serviceMesh, "mTLS, retries, timeouts", "Envoy sidecar")
+Rel(auctionSvc, serviceMesh, "mTLS, retries, timeouts", "Envoy sidecar")
+
+Rel(apiGateway, observability, "Metrics, logs, traces", "OpenTelemetry")
+Rel(bidGateway, observability, "RTB latency, errors, timeouts, traces", "OpenTelemetry")
+Rel(adServerSvc, observability, "Critical path metrics", "OpenTelemetry")
+Rel(auctionSvc, observability, "Auction latency and decision metrics", "OpenTelemetry")
+Rel(eventCollector, observability, "Event ingestion metrics", "OpenTelemetry")
+Rel(messageBroker, observability, "Kafka lag, throughput, errors", "Exporters")
+Rel(redisCluster, observability, "Cache hit ratio, latency", "Exporters")
+Rel(financeSvc, observability, "Financial operations metrics", "OpenTelemetry")
+
+Rel(messageBroker, schemaRegistry, "Validates event schemas", "Avro / Protobuf / JSON Schema")
+
+' ====================== Layout hints ======================
+Lay_R(apiGateway, bidGateway)
+Lay_D(bidGateway, adServerSvc)
+Lay_R(adServerSvc, auctionSvc)
+Lay_R(auctionSvc, deliverySvc)
+Lay_D(adServerSvc, redisCluster)
+Lay_D(deliverySvc, eventCollector)
+Lay_D(eventCollector, messageBroker)
+Lay_R(messageBroker, statsProcessor)
+Lay_R(statsProcessor, statsDb)
+Lay_D(apiGateway, dashboardBff)
+Lay_R(dashboardBff, campaignSvc)
+Lay_R(campaignSvc, campaignDb)
+Lay_D(financeSvc, financeDb)
+Lay_R(reportingSvc, analyticsDwh)
+
+' ====================== Notes ======================
+note right of bidGateway
+  **RTB входной слой**
+  Изолирует DSP-партнёров от core bidding.
+  Выполняет validation, rate limiting,
+  timeout budget и canary routing.
+
+  Граница выбрана по внешнему протоколу
+  и партнёрскому трафику.
+end note
+
+note right of auctionSvc
+  **Auction Service — critical path**
+  Не выполняет тяжёлые SQL-запросы.
+  Использует кэш и локальные snapshots.
+  Синхронная БД исключена из hot path.
+
+  Граница выбрана по домену bidding
+  и latency-sensitive логике.
+end note
+
+note bottom of messageBroker
+  **Kafka — event backbone**
+  Разделяет RTB, статистику,
+  биллинг и аналитику.
+  Пики событий буферизуются,
+  consumer lag не влияет на bid response.
+end note
+
+note bottom of redisCluster
+  **Redis hot data cache**
+  Кампании, ставки, таргетинг,
+  budget snapshots и caps доступны
+  с минимальной задержкой.
+end note
+
+note bottom of financeDb
+  **Финансовая консистентность**
+  Finance DB остаётся ACID-хранилищем.
+  Ledger и балансы не разделяются
+  с RTB и аналитикой.
+end note
+
+note right of analyticsDwh
+  **Аналитика изолирована**
+  Тяжёлые отчёты выполняются
+  в DWH / ClickHouse,
+  а не в OLTP-базах.
+end note
+
+' ====================== Legend ======================
+legend right
+  <#00AA00> **Цель через год**
+  <#00AA00> До 50 000 RPS
+  <#00AA00> SLA availability: 99,9%
+  <#00AA00> P95 RTB-response ≤ 80–100 ms
+
+  <#FF7700> **RTB hot path**
+  DSP Bid Gateway → Ad Serving → Auction → Delivery
+
+  <#3366CC> **Event-driven**
+  Kafka для impressions, clicks, auction results, billing events
+
+  <#9933CC> **Data isolation**
+  Отдельные БД по сервисам:
+  Campaign DB, Finance DB, Stats Store, DWH, User Store
+
+  <#888888> **Platform**
+  API Gateway, Redis, Kafka, Service Mesh,
+  Observability, Feature Flags, Schema Registry
+endlegend
+
+@enduml
