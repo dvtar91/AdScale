@@ -96,7 +96,7 @@ biddingService:
 
 # 4. Промежуточная C4 Container-диаграмма через 3 месяца
 
-В отдельном файле diagrams/
+В отдельном файле diagrams/TOBE.md
 
 # 5. API `biddingService`
 
